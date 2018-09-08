@@ -1,3 +1,5 @@
+#!/usr/bin/python
+# -*- coding:utf-8 -*-
 '''
 Created on Aug 20, 2018
 Reference from marvis, but this version does not use cuda
@@ -85,7 +87,10 @@ def build_targets(pred_boxes, target, anchors, num_anchors, num_classes, nH, nW,
 
     nAnchors = nA*nH*nW
     nPixels  = nH*nW
-    for b in xrange(nB):
+    # 计算13x13x5的每个预测框与gtbox的多个目标框的Max_iou，目的计算没有目标的conf_loss
+    # 若Max_iou>thresh，表示有目标，loss置零，不计算loss，木  后面会处理
+    # 若Max_iou<thresh, 表示没有目标，只计算置信度的误差
+    for b in xrange(nB): # b为gtbox中的目标框数目
         cur_pred_boxes = pred_boxes[b*nAnchors:(b+1)*nAnchors].t()
         cur_ious = torch.zeros(nAnchors)
         for t in xrange(50):
@@ -97,7 +102,8 @@ def build_targets(pred_boxes, target, anchors, num_anchors, num_classes, nH, nW,
             gh = target[b][t*5+4]*nH
             cur_gt_boxes = torch.FloatTensor([gx,gy,gw,gh]).repeat(nAnchors,1).t()
             cur_ious = torch.max(cur_ious, bbox_ious(cur_pred_boxes, cur_gt_boxes, x1y1x2y2=False))
-        conf_mask[b][cur_ious>sil_thresh] = 0
+        conf_mask[b][cur_ious>sil_thresh] = 0 #当>阈值，置0,表示有目标
+    # 训练前期使用预测框快速学习到先验框的形状
     if seen < 12800:
        if anchor_step == 4:
            tx = torch.FloatTensor(anchors).view(nA, anchor_step).index_select(1, torch.LongTensor([2])).view(1,nA,1,1).repeat(nB,1,nH,nW)
@@ -110,6 +116,10 @@ def build_targets(pred_boxes, target, anchors, num_anchors, num_classes, nH, nW,
        coord_mask.fill_(1)
     nGT = 0
     nCorrect = 0
+    # 只计算与gtbox匹配的预测框loss(conf+coord+class),匹配原则
+    # 1, 找到gtbox中心点分别与cell对应的5个预测框
+    # 2， 不考虑x, y 的偏移，计算与gtbox的IOU, 求5个预测box中的Max_iou，将其对应的box作为匹配的box
+    # 3, 剩下没有匹配的到的box若iou值 > threth ，忽略，不求任何损失，iou < threth 的box只计算置信度损失在最开始地方已经计算了
     for b in xrange(nB):
         for t in xrange(50):
             if target[b][t*5+1] == 0:
@@ -124,16 +134,17 @@ def build_targets(pred_boxes, target, anchors, num_anchors, num_classes, nH, nW,
             gj = int(gy)
             gw = target[b][t*5+3]*nW
             gh = target[b][t*5+4]*nH
-            gt_box = [0, 0, gw, gh]
+            gt_box = [0, 0, gw, gh] 
             for n in xrange(nA):
                 aw = anchors[anchor_step*n]
                 ah = anchors[anchor_step*n+1]
                 anchor_box = [0, 0, aw, ah]
-                iou  = bbox_iou(anchor_box, gt_box, x1y1x2y2=False)
+                iou  = bbox_iou(anchor_box, gt_box, x1y1x2y2=False) # 忽略偏移，计算IOU
                 if anchor_step == 4:
                     ax = anchors[anchor_step*n+2]
                     ay = anchors[anchor_step*n+3]
                     dist = pow(((gi+ax) - gx), 2) + pow(((gj+ay) - gy), 2)
+                # 找到Max_iou
                 if iou > best_iou:
                     best_iou = iou
                     best_n = n
@@ -141,7 +152,7 @@ def build_targets(pred_boxes, target, anchors, num_anchors, num_classes, nH, nW,
                     best_iou = iou
                     best_n = n
                     min_dist = dist
-
+            # gtbox找到匹配的预测的box后直接计算损失 iou+coord+class
             gt_box = [gx, gy, gw, gh]
             pred_box = pred_boxes[b*nAnchors+best_n*nPixels+gj*nW+gi]
 
@@ -152,7 +163,7 @@ def build_targets(pred_boxes, target, anchors, num_anchors, num_classes, nH, nW,
             ty[b][best_n][gj][gi] = target[b][t*5+2] * nH - gj
             tw[b][best_n][gj][gi] = math.log(gw/anchors[anchor_step*best_n])
             th[b][best_n][gj][gi] = math.log(gh/anchors[anchor_step*best_n+1])
-            iou = bbox_iou(gt_box, pred_box, x1y1x2y2=False) # best_iou
+            iou = bbox_iou(gt_box, pred_box, x1y1x2y2=False) 
             tconf[b][best_n][gj][gi] = iou
             tcls[b][best_n][gj][gi] = target[b][t*5]
             if iou > 0.5:
